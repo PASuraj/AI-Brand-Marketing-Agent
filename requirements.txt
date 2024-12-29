@@ -1,0 +1,10 @@
+streamlit
+scrapy
+sentence-transformers
+torch
+transformers
+langchain
+langchain-ollama
+numpy
+scipy
+requests
