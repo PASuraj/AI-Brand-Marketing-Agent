@@ -1,147 +1,72 @@
-from sentence_transformers import SentenceTransformer, util
-from langchain_ollama import OllamaLLM
-from langchain_core.prompts import ChatPromptTemplate
-from typing import List, Dict, Any
 import logging
+from transformers import BertTokenizer, BertModel
+import torch
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class SemanticProcessor:
-    """Handle semantic search and content processing."""
+# Load BERT model and tokenizer
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model = BertModel.from_pretrained('bert-base-uncased')
+
+def generate_bert_embeddings(texts):
+    """
+    Generate embeddings for a list of texts using BERT.
     
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        """Initialize with specified embedding model."""
-        self.model = SentenceTransformer(model_name)
+    Args:
+        texts (list): List of texts to convert to embeddings.
         
-    def search_articles(
-        self, 
-        articles: List[Dict], 
-        query: str, 
-        threshold: float = 0.5
-    ) -> List[Dict]:
-        """
-        Search articles using semantic similarity.
-        
-        Args:
-            articles: List of article dictionaries
-            query: Search query
-            threshold: Minimum similarity score (0-1)
-            
-        Returns:
-            List of matching articles with similarity scores
-        """
-        try:
-            # Encode search query
-            query_embedding = self.model.encode(query, convert_to_tensor=True)
-            matches = []
-            
-            # Process each article
-            for article in articles:
-                # Combine title and body for context
-                content = f"{article['title']} {article['body']}"
-                content_embedding = self.model.encode(content, convert_to_tensor=True)
-                
-                # Calculate similarity
-                similarity = util.pytorch_cos_sim(query_embedding, content_embedding).item()
-                
-                if similarity > threshold:
-                    matches.append({
-                        'article': article,
-                        'similarity': similarity
-                    })
-            
-            # Sort by similarity score
-            return sorted(matches, key=lambda x: x['similarity'], reverse=True)
-            
-        except Exception as e:
-            logger.error(f"Semantic search error: {str(e)}")
-            return []
+    Returns:
+        embeddings (list): List of embeddings.
+    """
+    inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
+    with torch.no_grad():
+        outputs = model(**inputs)
+    embeddings = outputs.last_hidden_state[:, 0, :].numpy()
+    return embeddings
 
-class ContentParser:
-    """Parse and analyze content using LLM."""
+def semantic_search(query, articles):
+    """
+    Perform semantic search to find the most similar articles to the query.
     
-    def __init__(self, model_name: str = "llama3.1"):
-        """Initialize with specified LLM model."""
-        self.llm = OllamaLLM(model=model_name)
-        
-        # Define analysis prompt template
-        self.template = """
-        Analyze the following content and extract relevant information based on this description: {description}
-
-        Content:
-        {content}
-
-        Format your response as follows:
-        
-        Key Information:
-        1. [First key point]
-        2. [Second key point]
-        ...
-
-        Analysis:
-        [Detailed analysis of findings]
-
-        Summary:
-        [Brief summary of key takeaways]
-        """
-        
-    def parse_articles(
-        self, 
-        articles: List[Dict], 
-        description: str, 
-        chunk_size: int = 3000
-    ) -> str:
-        """
-        Parse and analyze articles using LLM.
-        
-        Args:
-            articles: List of articles with similarity scores
-            description: Analysis criteria
-            chunk_size: Maximum content chunk size
-            
-        Returns:
-            Parsed and analyzed content
-        """
-        try:
-            prompt = ChatPromptTemplate.from_template(self.template)
-            results = []
-            
-            # Process articles in chunks
-            current_chunk = []
-            current_size = 0
-            
-            for article_data in articles:
-                article = article_data['article']
-                article_text = f"Title: {article['title']}\nContent: {article['body']}\n"
-                
-                # Check if adding article would exceed chunk size
-                if current_size + len(article_text) > chunk_size:
-                    # Process current chunk
-                    chunk_result = self._process_chunk(current_chunk, description, prompt)
-                    if chunk_result:
-                        results.append(chunk_result)
-                    current_chunk = [article_text]
-                    current_size = len(article_text)
-                else:
-                    current_chunk.append(article_text)
-                    current_size += len(article_text)
-            
-            # Process final chunk
-            if current_chunk:
-                chunk_result = self._process_chunk(current_chunk, description, prompt)
-                if chunk_result:
-                    results.append(chunk_result)
-            
-            return "\n\n---\n\n".join(results)
-            
-        except Exception as e:
-            logger.error(f"Content parsing error: {str(e)}")
-            return "Error occurred during content analysis."
+    Args:
+        query (str): The query to search for.
+        articles (list): List of articles, each containing 'title' and 'body'.
     
-    def _process_chunk(self, chunk: List[str], description: str, prompt) -> str:
-        """Process a single content chunk."""
-        content = "\n\n".join(chunk)
-        return self.llm.invoke(prompt.format(
-            description=description,
-            content=content
-        )).strip()
+    Returns:
+        List[Dict]: The most relevant articles based on the query.
+    """
+    article_titles = [article['title'] for article in articles]
+    article_texts = [article['body'] for article in articles]
+
+    # Get embeddings for the query and articles using BERT
+    query_embedding = generate_bert_embeddings([query])
+    article_embeddings = generate_bert_embeddings(article_titles)
+
+    # Compute cosine similarities between the query and articles
+    similarities = cosine_similarity(query_embedding, article_embeddings)[0]
+
+    # Get the top 3 most similar articles
+    top_indices = np.argsort(similarities)[::-1][:3]
+    top_articles = [{'title': article_titles[i], 'body': article_texts[i], 'similarity': similarities[i]} for i in top_indices]
+
+    return top_articles
+
+def process_articles(articles, query):
+    """
+    Process the scraped articles for semantic search.
+    
+    Args:
+        articles (list): List of scraped articles.
+        query (str): The query for semantic search.
+    
+    Returns:
+        list: Articles with semantic search results.
+    """
+    # Perform semantic search to find relevant articles
+    relevant_articles = semantic_search(query, articles)
+    logger.info(f"Found {len(relevant_articles)} relevant articles based on the query.")
+    return relevant_articles
