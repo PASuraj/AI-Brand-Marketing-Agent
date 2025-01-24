@@ -1,135 +1,93 @@
+import os
 import streamlit as st
-from typing import List, Dict
-import logging
-from scrape import scrape_website
-from parse import SemanticProcessor, ContentParser
+from scrape import scrape_website  # Assumes this function exists to scrape articles
+from parse import process_articles  # Assumes this function exists to parse articles
+from openai import OpenAI  # Importing OpenAI for DeepSeek integration
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Initialize the DeepSeek client
+client = OpenAI(api_key="DEEPSEEK-API-KEY", base_url="https://api.deepseek.com")
 
-class WebScraperApp:
-    """Main application class for web scraping and analysis."""
+def get_deepseek_response(query, context):
+    """Query the DeepSeek chat model synchronously with a prompt and context."""
+    try:
+        # Call DeepSeek's chat completions API
+        response = client.chat.completions.create(
+            model="deepseek-chat",  # Use the DeepSeek model
+            messages=[
+                {"role": "system", "content": "You are an assistant helping answer questions based on scraped articles."},
+                {"role": "user", "content": f"Answer the following question based on the provided articles:\n\n{context}\n\nQuestion: {query}"}
+            ],
+            stream=False  # Set to False for a single response
+        )
 
-    def __init__(self):
-        """Initialize application components."""
-        self.semantic_processor = SemanticProcessor()
-        self.content_parser = ContentParser()
-        self.initialize_session_state()
+        # Inspect the structure of the response
+        print(response)  # Check the response structure in the terminal/log
 
-    def initialize_session_state(self):
-        """Set up initial session state variables."""
-        if "articles" not in st.session_state:
-            st.session_state.articles = []
-        if "analysis_description" not in st.session_state:
-            st.session_state.analysis_description = ""
+        # Attempt to access the content safely (adjust based on the actual structure)
+        if hasattr(response, 'choices') and response.choices:
+            return response.choices[0].message.content.strip()
+        else:
+            return "No response found or unexpected response structure."
 
-    def run(self):
-        """Run the Streamlit application."""
-        st.title("AI Web Content Analyzer")
+    except Exception as e:
+        return f"Error occurred: {str(e)}"
 
-        # Scraping Section
-        with st.container():
-            st.subheader("Web Scraping")
-            url = st.text_input("Enter Website URL")
+def main():
+    st.title("Web Scraping and DeepSeek Query")
 
-            if st.button("Scrape Content"):
-                if url:
-                    with st.spinner("Scraping website..."):
-                        try:
-                            articles = scrape_website(url)
-                            st.session_state.articles = articles
-                            st.success(f"Successfully scraped {len(articles)} articles!")
-                        except Exception as e:
-                            st.error(f"Error scraping website: {str(e)}")
+    # Initialize session state to store scraped articles
+    if "articles" not in st.session_state:
+        st.session_state.articles = []
 
-        # Display scraped content
-        if st.session_state.articles:
-            with st.expander("View Scraped Content"):
-                for idx, article in enumerate(st.session_state.articles, 1):
-                    st.markdown(f"**Article {idx}**")
-                    st.write(f"Title: {article['title']}")
-                    st.write(f"Preview: {article['body'][:200]}...")
-                    st.markdown("---")
+    # User input for the URL
+    website_url = st.text_input("Enter the website URL to scrape:", "")
 
-        # Analysis Section
-        if st.session_state.articles:
-            with st.container():
-                st.subheader("2. Content Analysis")
+    # Scrape button
+    if st.button("Scrape Website"):
+        if website_url:
+            st.write(f"Scraping data from: {website_url}")
+            articles = scrape_website(website_url)  # Scrape articles from the URL
 
-                # Analysis parameters
-                description = st.text_area(
-                    "What information are you looking for?",
-                    st.session_state.analysis_description
-                )
+            if articles:
+                st.session_state.articles = articles  # Store articles in session state
+                st.success(f"Scraped {len(articles)} articles successfully!")
+            else:
+                st.warning("No articles found. Please check the URL or website structure.")
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    threshold = st.slider(
-                        "Similarity Threshold",
-                        0.1, 1.0, 0.5, 0.1,
-                        help="Higher values mean stricter matching"
-                    )
-                with col2:
-                    top_k = st.number_input(
-                        "Maximum Results",
-                        min_value=1,
-                        max_value=20,
-                        value=5,
-                        help="Maximum number of articles to analyze"
-                    )
+    # Display scraped articles (if any)
+    if st.session_state.articles:
+        st.write(f"**Total Articles Scraped:** {len(st.session_state.articles)}")
 
-                if st.button("Analyze Content"):
-                    if description:
-                        self.analyze_content(description, threshold, top_k)
-                    else:
-                        st.warning("Please describe what information you're looking for.")
+        # Collapsible display for all articles
+        with st.expander("View All Scraped Articles"):
+            for i, article in enumerate(st.session_state.articles):
+                st.write(f"**{i + 1}. {article['title']}**")
+                st.write(f"**Summary:** {article['body'][:500]}...")  # Preview first 500 characters
+                st.write("---")
 
-    def analyze_content(self, description: str, threshold: float, top_k: int):
-        """
-        Process content analysis request.
+        # Ask for user query
+        query = st.text_input("Enter your query:", "")
 
-        Args:
-            description: Analysis criteria
-            threshold: Similarity threshold
-            top_k: Maximum number of results
-        """
-        try:
-            with st.spinner("Analyzing content..."):
-                # Semantic search
-                matches = self.semantic_processor.search_articles(
-                    st.session_state.articles,
-                    description,
-                    threshold
-                )[:top_k]
+        # Submit button for query
+        if st.button("Submit Query"):
+            if query:
+                st.write(f"Performing DeepSeek query: {query}")
 
-                if matches:
-                    st.write(f"Found {len(matches)} relevant articles")
+                # Combine the content of all articles for context
+                context = " ".join([article['body'] for article in st.session_state.articles[:3]])  # Use first 3 articles for context
 
-                    # Parse and analyze content
-                    analysis = self.content_parser.parse_articles(
-                        matches,
-                        description
-                    )
+                try:
+                    # Get DeepSeek's response to the query (synchronously)
+                    response = get_deepseek_response(query, context)
 
-                    # Display results
-                    st.subheader("Analysis Results")
-                    st.write(analysis)
+                    # Display the response
+                    st.write("### DeepSeek Response:")
+                    st.write(response)
+                except Exception as e:
+                    st.error(f"Error in processing query with DeepSeek: {e}")
+            else:
+                st.warning("Please enter a query to proceed.")
 
-                    # Show matching articles
-                    with st.expander("View Matching Articles"):
-                        for idx, match in enumerate(matches, 1):
-                            st.markdown(f"**Match {idx}** (Similarity: {match['similarity']:.2f})")
-                            st.write(f"Title: {match['article']['title']}")
-                            st.write(f"Content: {match['article']['body'][:200]}...")
-                            st.markdown("---")
-                else:
-                    st.warning("No matching content found. Try adjusting the similarity threshold.")
-
-        except Exception as e:
-            logger.error(f"Analysis error: {str(e)}")
-            st.error("Error occurred during analysis.")
-
+# Run the Streamlit app
 if __name__ == "__main__":
-    app = WebScraperApp()
-    app.run()
+    main()
