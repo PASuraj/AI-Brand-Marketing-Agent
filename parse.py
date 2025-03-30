@@ -1,72 +1,134 @@
 import logging
-from transformers import BertTokenizer, BertModel
-import torch
+import faiss
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
+import torch
+import pickle
+import os
+from transformers import BertTokenizer, BertModel
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Load BERT model and tokenizer
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-model = BertModel.from_pretrained('bert-base-uncased')
+try:
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    model = BertModel.from_pretrained("bert-base-uncased")
+except Exception as e:
+    logger.error(f"Error loading BERT model: {e}")
+    raise
 
+# FAISS index and metadata files
+FAISS_INDEX_FILE = "faiss_index.bin"
+METADATA_FILE = "metadata.pkl"
+
+# Load or initialize FAISS index
+def load_faiss_index():
+    try:
+        if os.path.exists(FAISS_INDEX_FILE) and os.path.exists(METADATA_FILE):
+            index = faiss.read_index(FAISS_INDEX_FILE)
+            with open(METADATA_FILE, "rb") as f:
+                metadata = pickle.load(f)  # Load article metadata
+            logger.info("FAISS index loaded from disk.")
+        else:
+            index = faiss.IndexFlatL2(768)  # L2 distance for 768-dim vectors
+            metadata = []  # Empty metadata list
+            logger.info("Initialized new FAISS index.")
+        return index, metadata
+    except Exception as e:
+        logger.error(f"Error loading FAISS index: {e}")
+        raise
+
+# Save FAISS index & metadata
+def save_faiss_index(index, metadata):
+    try:
+        faiss.write_index(index, FAISS_INDEX_FILE)
+        with open(METADATA_FILE, "wb") as f:
+            pickle.dump(metadata, f)  # Save metadata
+        logger.info("FAISS index saved to disk.")
+    except Exception as e:
+        logger.error(f"Error saving FAISS index: {e}")
+        raise
+
+# Generate BERT embeddings
 def generate_bert_embeddings(texts):
-    """
-    Generate embeddings for a list of texts using BERT.
-    
-    Args:
-        texts (list): List of texts to convert to embeddings.
+    try:
+        inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
+        with torch.no_grad():
+            outputs = model(**inputs)
+        return outputs.last_hidden_state[:, 0, :].numpy()  # Extract CLS token embeddings
+    except Exception as e:
+        logger.error(f"Error generating BERT embeddings: {e}")
+        raise
+
+# Store embeddings in FAISS
+def store_embeddings(articles):
+    try:
+        index, metadata = load_faiss_index()
+
+        article_titles = [article["title"] for article in articles]
+        article_bodies = [article["body"] for article in articles]
+
+        embeddings = generate_bert_embeddings(article_bodies)
+
+        index.add(embeddings)  # Add new embeddings to FAISS
+        metadata.extend(zip(article_titles, article_bodies))  # Store metadata
+
+        save_faiss_index(index, metadata)
+        logger.info(f"Stored {len(articles)} new articles in FAISS.")
+    except Exception as e:
+        logger.error(f"Error storing embeddings: {e}")
+        raise
+
+# Perform similarity search
+def semantic_search(query, top_k=3):
+    try:
+        index, metadata = load_faiss_index()
+
+        if index.ntotal == 0:
+            logger.warning("FAISS index is empty.")
+            return []
+
+        query_embedding = generate_bert_embeddings([query])
+        distances, indices = index.search(query_embedding, top_k)
+
+        results = []
+        for i in range(len(indices[0])):
+            idx = indices[0][i]
+            if idx < len(metadata):
+                title, body = metadata[idx]
+                results.append({"title": title, "body": body, "distance": distances[0][i]})
         
-    Returns:
-        embeddings (list): List of embeddings.
-    """
-    inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
-    with torch.no_grad():
-        outputs = model(**inputs)
-    embeddings = outputs.last_hidden_state[:, 0, :].numpy()
-    return embeddings
+        return results
+    except Exception as e:
+        logger.error(f"Error performing semantic search: {e}")
+        raise
 
-def semantic_search(query, articles):
-    """
-    Perform semantic search to find the most similar articles to the query.
-    
-    Args:
-        query (str): The query to search for.
-        articles (list): List of articles, each containing 'title' and 'body'.
-    
-    Returns:
-        List[Dict]: The most relevant articles based on the query.
-    """
-    article_titles = [article['title'] for article in articles]
-    article_texts = [article['body'] for article in articles]
+# Process new articles: store, search, and pass to LLM
+def process_articles(articles):
+    try:
+        index, metadata = load_faiss_index()
+        
+        results = []
+        
+        for article in articles:
+            title, body = article["title"], article["body"]
+            logger.info(f"Processing article: {title}")
 
-    # Get embeddings for the query and articles using BERT
-    query_embedding = generate_bert_embeddings([query])
-    article_embeddings = generate_bert_embeddings(article_titles)
+            # Find similar articles
+            similar_articles = semantic_search(title)
 
-    # Compute cosine similarities between the query and articles
-    similarities = cosine_similarity(query_embedding, article_embeddings)[0]
+            # Save new article in FAISS
+            store_embeddings([article])
 
-    # Get the top 3 most similar articles
-    top_indices = np.argsort(similarities)[::-1][:3]
-    top_articles = [{'title': article_titles[i], 'body': article_texts[i], 'similarity': similarities[i]} for i in top_indices]
-
-    return top_articles
-
-def process_articles(articles, query):
-    """
-    Process the scraped articles for semantic search.
-    
-    Args:
-        articles (list): List of scraped articles.
-        query (str): The query for semantic search.
-    
-    Returns:
-        list: Articles with semantic search results.
-    """
-    # Perform semantic search to find relevant articles
-    relevant_articles = semantic_search(query, articles)
-    logger.info(f"Found {len(relevant_articles)} relevant articles based on the query.")
-    return relevant_articles
+            # Prepare input for LLM: new article + similar historical articles
+            llm_input = {
+                "new_article": {"title": title, "body": body},
+                "similar_articles": similar_articles
+            }       
+            results.append(llm_input)
+        
+        return results
+    except Exception as e:
+        logger.error(f"Error processing articles: {e}")
+        raise
