@@ -11,7 +11,7 @@ import torch
 import numpy as np
 
 # Initialize AI Models
-client = Fireworks(api_key="fxxxxxxxxxxxxxxxxxxxxxxx")
+client = Fireworks(api_key="fw_xxxxxxxxxxxxxxxxxxxxx")
 sbert_model = SentenceTransformer('all-MiniLM-L6-v2')  # For semantic similarity
 sentiment_analyzer = SentimentIntensityAnalyzer()  # For sentiment & sarcasm analysis
 
